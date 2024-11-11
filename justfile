@@ -18,6 +18,8 @@ updates:
   rm updates.txt
 
 release:
+    # We'll just warm up gpg here
+    echo hi | gpg -s --pinentry-mode loopback
     # format so that we fail earlier if there are issues (release plugin will notice dirty working directory)
     just format
     # don't use mvnd here. no need to overoptimize

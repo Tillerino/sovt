@@ -69,4 +69,5 @@ vile.parent().get().parent().get().parent() // "/"
 
 ## Alternatives
 
-Please 
+Please drop me a line if you know of any other library that does this.
+I would prefer not to maintain this myself.
