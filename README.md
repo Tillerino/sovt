@@ -61,7 +61,7 @@ longFirst.parent() // "/home/user"
 If you want to match the natural segment structure of the path, use `from(Path)` or `from(File)`:
 ```java
 Vile vile = Vile.from(Path.of("/home/user/file1.txt"));
-vile.equals(Vile.get("/home/user", "file1.txt")) // true
+vile.equals(Vile.get("/", "home", "user", "file1.txt")) // true
 vile.parent() // "/home/user"
 vile.parent().get().parent() // "/home"
 vile.parent().get().parent().get().parent() // "/"

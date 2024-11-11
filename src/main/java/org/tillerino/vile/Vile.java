@@ -65,7 +65,7 @@ import java.util.function.Supplier;
  *
  * <pre>{@code
  * Vile vile = Vile.from(Path.of("/home/user/file1.txt"));
- * vile.equals(Vile.get("/home/user", "file1.txt")) // true
+ * vile.equals(Vile.get("/", "home", "user", "file1.txt")) // true
  * vile.parent() // "/home/user"
  * vile.parent().get().parent() // "/home"
  * vile.parent().get().parent().get().parent() // "/"
