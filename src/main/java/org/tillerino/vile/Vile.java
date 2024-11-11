@@ -3,17 +3,73 @@ package org.tillerino.vile;
 import java.io.*;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.SoftReference;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Hashtable;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 /**
  * A memory-efficient representation of a file path.
- * <p>
- * Each instance only stores its name and a reference to its parent. Instances are cached in a global tree structure.
+ *
+ * <p>Each instance only stores its name and a reference to its parent. Instances are cached in a global tree structure.
  * The tree structure contains soft values such that instances can be garbage collected.
+ *
+ * <p>Basic usage:
+ *
+ * <pre>{@code
+ * Vile file1 = Vile.get("/home/user", "file1.txt");
+ * file1.toString() // "/home/user/file1.txt"
+ * file1.toFile() // new File("/home/user/file1.txt")
+ * file1.toPath() // Paths.get("/home/user/file1.txt")
+ * Vile parent = file1.parent().get() // "/home/user"
+ * parent.parent() // empty! The path is not parsed and the segments are left as-is.
+ * parent.child("file2.txt") // "/home/user/file2.txt"
+ * }</pre>
+ *
+ * <p>Nodes are deduplicated where possible:
+ *
+ * <pre>{@code
+ * file1 == Vile.get("/home/user", "file1.txt") // true
+ * Vile file2 = Vile.get("/home/user", "file2.txt");
+ * file1.parent().get() == file2.parent().get() // true
+ * }</pre>
+ *
+ * <p>This is preserved through serialization:
+ *
+ * <pre>{@code
+ * ByteArrayOutputStream baos = new ByteArrayOutputStream();
+ * ObjectOutputStream oos = new ObjectOutputStream(baos);
+ * oos.writeObject(file1);
+ * oos.close();
+ * ByteArrayInputStream bais = new ByteArrayInputStream(baos.toByteArray());
+ * ObjectInputStream ois = new ObjectInputStream(bais);
+ * Vile file1Copy = (Vile) ois.readObject();
+ * file1 == file1Copy // true
+ * }</pre>
+ *
+ * <p>The granularity of the tree is determined by the length of the path segments:
+ *
+ * <pre>{@code
+ * Vile shortFirst = Vile.get("/home", "user/file1.txt");
+ * Vile longFirst = Vile.get("/home/user", "file1.txt");
+ * shortFirst.equals(longFirst) // false!
+ * shortFirst.parent() // "/home"
+ * longFirst.parent() // "/home/user"
+ * }</pre>
+ *
+ * <p>If you want to match the natural segment structure of the path, use {@link #from(Path)} or {@link #from(File)}:
+ *
+ * <pre>{@code
+ * Vile vile = Vile.from(Path.of("/home/user/file1.txt"));
+ * vile.equals(Vile.get("/home/user", "file1.txt")) // true
+ * vile.parent() // "/home/user"
+ * vile.parent().get().parent() // "/home"
+ * vile.parent().get().parent().get().parent() // "/"
+ * }</pre>
  */
 public class Vile implements Serializable {
     /**
@@ -30,25 +86,51 @@ public class Vile implements Serializable {
      */
     public static Supplier<Map<String, SoftValue>> MAP_FACTORY = Hashtable::new;
 
-    static Map<String, SoftValue> roots = new ConcurrentHashMap<>();
+    static final Map<String, SoftValue> roots = new ConcurrentHashMap<>();
 
-    private static ReferenceQueue<Vile> queue = new ReferenceQueue<>();
+    private static final ReferenceQueue<Vile> queue = new ReferenceQueue<>();
 
-    private Vile parent;
-    private String name;
+    private final Vile parent;
+    private final String name;
 
     /**
      * This field stores all children, but to optimize memory consumption, we go in steps: Initially (no children) the
      * field is null. With a single child, the field is a {@link SoftReference}. With two children, the field is an
      * array of soft references. Above 10 children, the field is a full-blown cache
      */
-    Object children = null;
+    transient Object children = null;
 
     Vile(Vile parent, String name) {
         this.parent = parent;
         this.name = name;
     }
 
+    /**
+     * Creates or returned the cached root node with the given name. Examples:
+     *
+     * <pre>{@code
+     * Vile root = Vile.root("/");
+     * Vile home = Vile.root("/home");
+     * Vile user = Vile.root("/home/user");
+     * Vile invoices = Vile.root("Documents/invoices");
+     * }</pre>
+     *
+     * <p>The name is not cleaned up in any way and taken exactly as is:
+     *
+     * <pre>{@code
+     * Vile.root("Documents").equals(Vile.root("Documents/")) // false!
+     * }</pre>
+     *
+     * <p>To create a sanitized root node, use a {@link Path} to parse the path:
+     *
+     * <pre>{@code
+     * Vile.from(Path.of("/home/")).equals(Vile.root("/home")) // true
+     * }</pre>
+     *
+     * @param name The path of this root node. This can be any path, absolute or relative, and with any number of
+     *     segments. May not be blank.
+     * @return A cached node, if possible.
+     */
     public static Vile root(String name) {
         validateNotBlank(name);
         gc();
@@ -71,6 +153,15 @@ public class Vile implements Serializable {
         }
     }
 
+    /**
+     * Returns a node with the given path. This is equivalent to
+     * {@code root(root).child(names[0]).child(names[1]).child(names[2]).child(names[3])...}.
+     *
+     * @param root The path of the root node. This can be any path, absolute or relative, and with any number of
+     *     segments.
+     * @param names The relative paths of the child nodes. These can comprise any number of segments. May not be blank.
+     * @return Cached instances of the node itself and any parents are returned if possible.
+     */
     public static Vile get(String root, String... names) {
         Vile v = root(root);
         for (String s : names) {
@@ -79,11 +170,54 @@ public class Vile implements Serializable {
         return v;
     }
 
+    /**
+     * Returns a node with the given path. Each segment of the path corresponds to a child node with the root node
+     * corresponding to the first segment or the root of the file system, if the path is absolute. Examples:
+     *
+     * <p>{@code from("Path.of("/home/user/file.txt")"} returns the same node as {@code get("/", "home", "user",
+     * "file.txt")}.
+     *
+     * <p>{@code from("Path.of("Documents/file.txt")"} returns the same node as {@code get("Documents", "file.txt")}.
+     *
+     * @param path any path
+     * @return Cached instances of the node itself and any parents are returned if possible.
+     */
+    public static Vile from(Path path) {
+        Path root = path.getRoot();
+        Vile v = root(root != null ? root.toString() : path.getName(0).toString());
+        for (int i = root != null ? 0 : 1; i < path.getNameCount(); i++) {
+            v = v.child(path.getName(i).toString());
+        }
+        return v;
+    }
+
+    /**
+     * Returns a node with the given path. Each segment of the path corresponds to a child node with the root node
+     * corresponding to the first segment or the root of the file system, if the path is absolute. Examples:
+     *
+     * <p>{@code from(new File("/home/user/file.txt")"} returns the same node as {@code get("/", "home", "user",
+     * "file.txt")}.
+     *
+     * <p>{@code from(new File("Documents/file.txt")"} returns the same node as {@code get("Documents", "file.txt")}.
+     *
+     * @param file any file
+     * @return Cached instances of the node itself and any parents are returned if possible.
+     */
+    public static Vile from(File file) {
+        return from(file.toPath());
+    }
+
+    /**
+     * Returns the child node with the given name. If the child node does not exist, it is created.
+     *
+     * @param name The sub-path of the child node. This can comprise any number of segments.
+     * @return A cached node, if possible.
+     */
     public Vile child(String name) {
         validateNotBlank(name);
         gc();
         synchronized (this) {
-            if (children instanceof Map<?, ?> c) {
+            if (children instanceof Map<?, ?>) {
                 // In this case, we can do everything outside the synchronized block.
                 // We check this first, so we can exit the synchronized block quickly.
             } else if (children == null) {
@@ -92,10 +226,8 @@ public class Vile implements Serializable {
                 return child;
             } else if (children instanceof SoftReference<?>) {
                 return getChildFromSingleSoftReferenceCache(name);
-            } else if (children instanceof SoftReference<?>[]) {
-                return getChildFromSoftReferenceArrayCache(name);
             } else {
-                throw new IllegalStateException();
+                return getChildFromSoftReferenceArrayCache(name);
             }
         }
         return computeIfAbsent((Map<String, SoftValue>) children, this, name);
@@ -175,8 +307,41 @@ public class Vile implements Serializable {
         return child;
     }
 
-    public int length() {
-        return parent != null ? parent.length() + 1 : 1;
+    /**
+     * Returns the name of this node. This value is not cleaned up in any way and returned exactly as it was passed in
+     * to create the node.
+     *
+     * @return not blank
+     */
+    public String name() {
+        return name;
+    }
+
+    /**
+     * Returns the parent node of this node.
+     *
+     * @return empty if this is the root node
+     */
+    public Optional<Vile> parent() {
+        return Optional.ofNullable(parent);
+    }
+
+    /**
+     * Converts this node to a {@link File}. May throw validation errors from the {@link File} constructor.
+     *
+     * @return a new instance
+     */
+    public File toFile() {
+        return new File(toString());
+    }
+
+    /**
+     * Converts this node to a {@link Path}. May throw validation errors from the {@link Path} creator.
+     *
+     * @return a new instance
+     */
+    public Path toPath() {
+        return Paths.get(toString());
     }
 
     @Override
@@ -232,31 +397,6 @@ public class Vile implements Serializable {
     }
 
     // SERIALIZATION
-
-    @Serial
-    private void writeObject(ObjectOutputStream oos) throws IOException {
-        oos.writeInt(length());
-        writeNameRecursive(oos);
-    }
-
-    private void writeNameRecursive(ObjectOutputStream oos) throws IOException {
-        if (parent != null) {
-            parent.writeNameRecursive(oos);
-        }
-        oos.writeObject(name);
-    }
-
-    @Serial
-    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
-        int length = in.readInt();
-        if (length > 1) {
-            parent = root((String) in.readObject());
-            for (int i = 2; i < length; i++) {
-                parent = parent.child((String) in.readObject());
-            }
-        }
-        name = (String) in.readObject();
-    }
 
     @Serial
     private Object readResolve() throws ObjectStreamException {

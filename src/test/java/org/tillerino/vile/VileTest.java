@@ -4,11 +4,14 @@ import static org.assertj.core.api.Assertions.*;
 
 import java.io.File;
 import java.lang.ref.SoftReference;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 import org.apache.commons.lang3.SerializationUtils;
+import org.apache.commons.lang3.SystemUtils;
+import org.assertj.core.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +44,11 @@ class VileTest {
                 .hasSameHashCodeAs(List.of("root1"))
                 .isSameAs(root1Again);
 
+        assertThat(root1.parent()).isEmpty();
+        assertThat(root1.name()).isEqualTo("root1");
+        assertThat(root1.toFile()).isEqualTo(new File("root1"));
+        assertThat(root1.toPath()).isEqualTo(Paths.get("root1"));
+
         assertThat(root2).hasToString("root2").isSameAs(Vile.root("root2"));
     }
 
@@ -67,6 +75,11 @@ class VileTest {
                 .hasSameHashCodeAs(List.of("root", "child1"))
                 .isEqualTo(new Vile(root, "child1"));
 
+        assertThat(child1.parent()).contains(root);
+        assertThat(child1.name()).isEqualTo("child1");
+        assertThat(child1.toFile()).isEqualTo(new File("root", "child1"));
+        assertThat(child1.toPath()).isEqualTo(Paths.get("root", "child1"));
+
         assertThat(child2).hasToString(join("root", "child2")).isSameAs(root.child("child2"));
     }
 
@@ -80,6 +93,46 @@ class VileTest {
         assertThatThrownBy(() -> root.child(""))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Name must not be blank");
+    }
+
+    @Test
+    void fromPath() {
+        Vile v = Vile.from(Paths.get("root", "child1", "child2"));
+        assertThat(v).isSameAs(Vile.root("root").child("child1").child("child2"));
+    }
+
+    @Test
+    void fromAbsPathLinuxStyle() {
+        Assumptions.assumeThat(SystemUtils.IS_OS_LINUX).isTrue();
+        Vile v = Vile.from(Paths.get("/root", "child1", "child2"));
+        assertThat(v).isSameAs(Vile.get("/", "root", "child1", "child2"));
+    }
+
+    @Test
+    void fromAbsPathLinuxStyleTrailingSlashes() {
+        Assumptions.assumeThat(SystemUtils.IS_OS_LINUX).isTrue();
+        Vile v = Vile.from(Paths.get("/root", "child1//", "child2/"));
+        assertThat(v).isSameAs(Vile.get("/", "root", "child1", "child2"));
+    }
+
+    @Test
+    void fromFile() {
+        Vile v = Vile.from(new File("root/child1/child2"));
+        assertThat(v).isSameAs(Vile.root("root").child("child1").child("child2"));
+    }
+
+    @Test
+    void fromAbsFileLinuxStyle() {
+        Assumptions.assumeThat(SystemUtils.IS_OS_LINUX).isTrue();
+        Vile v = Vile.from(new File("/root/child1/child2"));
+        assertThat(v).isSameAs(Vile.get("/", "root", "child1", "child2"));
+    }
+
+    @Test
+    void fromAbsFileLinuxStyleTrailingSlashes() {
+        Assumptions.assumeThat(SystemUtils.IS_OS_LINUX).isTrue();
+        Vile v = Vile.from(new File("/root/child1//child2/"));
+        assertThat(v).isSameAs(Vile.get("/", "root", "child1", "child2"));
     }
 
     @Test
